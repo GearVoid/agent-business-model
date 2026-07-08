@@ -4,6 +4,23 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>现在 Agent 到底怎么赚钱？</title>
+  <meta name="description" content="从主流玩家的定价方式，看 Agent 商业化的几种路径。">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Agent 商业化地图">
+  <meta property="og:title" content="现在 Agent 到底怎么赚钱？">
+  <meta property="og:description" content="从主流玩家的定价方式，看 Agent 商业化的几种路径。">
+  <meta property="og:url" content="https://gearvoid.github.io/agent-business-model/">
+  <meta property="og:image" content="https://gearvoid.github.io/agent-business-model/share-card.png?v=2">
+  <meta property="og:image:secure_url" content="https://gearvoid.github.io/agent-business-model/share-card.png?v=2">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="现在 Agent 到底怎么赚钱？">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="现在 Agent 到底怎么赚钱？">
+  <meta name="twitter:description" content="从主流玩家的定价方式，看 Agent 商业化的几种路径。">
+  <meta name="twitter:image" content="https://gearvoid.github.io/agent-business-model/share-card.png?v=2">
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png">
   <style>
     :root {
       --paper: #f8f7f4;
@@ -98,14 +115,7 @@
       box-shadow: 0 0 20px rgba(138, 21, 56, 0.28);
       transform: scaleX(0);
       transform-origin: left center;
-      animation: reading-progress linear both;
-      animation-timeline: scroll(root);
-    }
-
-    @keyframes reading-progress {
-      to {
-        transform: scaleX(1);
-      }
+      will-change: transform;
     }
 
     .page-shell {
@@ -1005,8 +1015,7 @@
       }
 
       .scroll-progress span {
-        animation: none;
-        transform: none;
+        transition: none;
       }
     }
 
@@ -1620,6 +1629,31 @@
       document.documentElement.classList.add("js");
       const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
       const revealItems = document.querySelectorAll(".reveal");
+      const progressBar = document.querySelector(".scroll-progress span");
+
+      const updateProgress = () => {
+        if (!progressBar) return;
+        const doc = document.documentElement;
+        const viewportHeight = window.visualViewport?.height || window.innerHeight || doc.clientHeight;
+        const maxScroll = Math.max(1, doc.scrollHeight - viewportHeight);
+        const progress = Math.min(1, Math.max(0, window.scrollY / maxScroll));
+        progressBar.style.transform = `scaleX(${progress})`;
+      };
+
+      let progressFrame = 0;
+      const requestProgressUpdate = () => {
+        if (progressFrame) return;
+        progressFrame = window.requestAnimationFrame(() => {
+          progressFrame = 0;
+          updateProgress();
+        });
+      };
+
+      updateProgress();
+      window.addEventListener("scroll", requestProgressUpdate, { passive: true });
+      window.addEventListener("resize", requestProgressUpdate, { passive: true });
+      window.visualViewport?.addEventListener("resize", requestProgressUpdate, { passive: true });
+      window.addEventListener("load", requestProgressUpdate, { once: true });
 
       if (reduced || !("IntersectionObserver" in window)) {
         revealItems.forEach((item) => item.classList.add("visible"));
