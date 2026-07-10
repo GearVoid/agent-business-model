@@ -49,6 +49,7 @@ python scripts/deliver.py --transport webhook
 
 - Python 3.13 + Pillow：`pip install -r requirements-optional.txt`
 - OpenAlex 邮箱：填 `config/enrich.json` 的 `openalex_mailto`，或设环境变量 `OPENALEX_MAILTO`
+- 中文 PNG 字体：若希望图片标题/分区保持中文，云端镜像需安装 CJK 字体（推荐 Noto Sans CJK / Source Han Sans）。未安装时 `image_renderer.py` 会自动把图片标签降级为英文，避免方块字；`message.txt` 仍保留中文。
 - 工作目录须含 `config/`、`scripts/`、`README-perovskite-scout.md`
 
 ## 边界（已守住，调度方无需关心）

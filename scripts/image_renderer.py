@@ -61,32 +61,129 @@ FONT_PATHS = {
         "C:/Windows/Fonts/simsun.ttc",
         "C:/Windows/Fonts/msyhbd.ttc",
         "C:/Windows/Fonts/msyh.ttc",
+        "/System/Library/Fonts/PingFang.ttc",
+        "/System/Library/Fonts/STHeiti Light.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/opentype/source-han-serif/SourceHanSerifCN-Regular.otf",
+        "/usr/share/fonts/opentype/source-han-sans/SourceHanSansCN-Regular.otf",
+        "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
     ],
     "body": [
         "C:/Windows/Fonts/msyh.ttc",
         "C:/Windows/Fonts/simhei.ttf",
         "C:/Windows/Fonts/simsun.ttc",
+        "/System/Library/Fonts/PingFang.ttc",
+        "/System/Library/Fonts/STHeiti Light.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/opentype/source-han-sans/SourceHanSansCN-Regular.otf",
+        "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     ],
     "bold": [
         "C:/Windows/Fonts/msyhbd.ttc",
         "C:/Windows/Fonts/simhei.ttf",
         "C:/Windows/Fonts/msyh.ttc",
+        "/System/Library/Fonts/PingFang.ttc",
+        "/System/Library/Fonts/STHeiti Medium.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc",
+        "/usr/share/fonts/opentype/source-han-sans/SourceHanSansCN-Bold.otf",
+        "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
     ],
     "serif": [
         "C:/Windows/Fonts/georgia.ttf",
         "C:/Windows/Fonts/times.ttf",
         "C:/Windows/Fonts/msyh.ttc",
+        "/System/Library/Fonts/Georgia.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
+        "/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
     ],
 }
 
+CJK_FONT_MARKERS = (
+    "msyh",
+    "simhei",
+    "simsun",
+    "pingfang",
+    "heiti",
+    "songti",
+    "notoSansCJK".lower(),
+    "notoSerifCJK".lower(),
+    "sourcehan",
+    "wqy",
+)
 
-def load_font(size: int, role: str = "body"):
+
+def find_font_path(role: str) -> str | None:
     for path in FONT_PATHS.get(role, FONT_PATHS["body"]):
         if Path(path).exists():
-            try:
-                return ImageFont.truetype(path, size)
-            except OSError:
-                continue
+            return path
+    return None
+
+
+SELECTED_FONT_PATHS = {role: find_font_path(role) for role in FONT_PATHS}
+CJK_IMAGE_TEXT = any(
+    path and any(marker in path.lower().replace("-", "") for marker in CJK_FONT_MARKERS)
+    for path in SELECTED_FONT_PATHS.values()
+)
+
+IMAGE_TEXT_TRANSLATION = str.maketrans(
+    {
+        "₀": "0",
+        "₁": "1",
+        "₂": "2",
+        "₃": "3",
+        "₄": "4",
+        "₅": "5",
+        "₆": "6",
+        "₇": "7",
+        "₈": "8",
+        "₉": "9",
+        "⁰": "0",
+        "¹": "1",
+        "²": "2",
+        "³": "3",
+        "⁴": "4",
+        "⁵": "5",
+        "⁶": "6",
+        "⁷": "7",
+        "⁸": "8",
+        "⁹": "9",
+        "α": "alpha",
+        "β": "beta",
+        "γ": "gamma",
+        "δ": "delta",
+        "μ": "micro",
+        "µ": "micro",
+    }
+)
+
+
+def ui_text(chinese: str, english: str) -> str:
+    """Use English labels when the runtime lacks a CJK-capable font."""
+    return chinese if CJK_IMAGE_TEXT else english
+
+
+def image_text(text: str | None) -> str:
+    """Normalize text for broad font support in raster cards."""
+    return sanitize_text(text or "").translate(IMAGE_TEXT_TRANSLATION)
+
+
+def load_font(size: int, role: str = "body"):
+    path = SELECTED_FONT_PATHS.get(role) or SELECTED_FONT_PATHS.get("body")
+    if path:
+        try:
+            return ImageFont.truetype(path, size)
+        except OSError:
+            pass
     return ImageFont.load_default()
 
 
@@ -95,7 +192,7 @@ def text_w(font, text: str) -> float:
 
 
 def wrap_text(text: str, font, max_width: int, max_lines: int | None = None) -> list[str]:
-    text = sanitize_text(text or "").replace("\n", " ").strip()
+    text = image_text(text).replace("\n", " ").strip()
     if not text:
         return [""]
 
@@ -136,12 +233,12 @@ def ellipsize(text: str, font, max_width: int) -> str:
 def fmt_authors(authors: list[str]) -> str:
     if not authors:
         return "Unknown authors"
-    first = sanitize_text(str(authors[0]))
+    first = image_text(str(authors[0]))
     return f"{first} et al." if len(authors) > 1 else first
 
 
 def short_summary(abstract: str, chars: int = 150) -> str:
-    text = sanitize_text(abstract or "").replace("\n", " ").strip()
+    text = image_text(abstract or "").replace("\n", " ").strip()
     return text[:chars].rstrip() + "..." if len(text) > chars else text
 
 
@@ -181,11 +278,11 @@ def load_industry_top() -> list[dict]:
 def draw_industry(draw: ImageDraw.ImageDraw, items: list[dict], y: int) -> int:
     if not items:
         return y
-    label_font = load_font(33, "serif")
+    label_font = load_font(33, "title" if CJK_IMAGE_TEXT else "serif")
     title_font = load_font(24, "bold")
     meta_font = load_font(19, "body")
 
-    draw.text((MARGIN_X, y), "产业动态", font=label_font, fill=GREEN)
+    draw.text((MARGIN_X, y), ui_text("产业动态", "Industry Signals"), font=label_font, fill=GREEN)
     draw.line([(MARGIN_X, y + 46), (200, y + 46)], fill=AMBER, width=4)
     y += 78
 
@@ -249,7 +346,7 @@ def draw_header(draw: ImageDraw.ImageDraw, today: str) -> None:
     draw.ellipse([42, 54, 62, 74], outline=HAIRLINE, width=2)
     draw.text((820, 48), "Research Digest", font=label_font, fill=GREEN)
 
-    draw.text((MARGIN_X, 150), "钙钛矿情报雷达", font=title_font, fill=INK)
+    draw.text((MARGIN_X, 150), ui_text("钙钛矿情报雷达", "Perovskite Scout"), font=title_font, fill=INK)
     draw.line([(MARGIN_X, 246), (690, 246)], fill=INK, width=2)
     draw.ellipse([688, 242, 696, 250], fill=INK)
 
@@ -333,7 +430,10 @@ def render_pil(top: list[dict], today: str) -> list[Path]:
     draw_source_mark(draw, MARGIN_X, HEIGHT - 92, foot_font)
 
     note_font = load_font(20, "body")
-    note = "完整链接见配套 digest.txt  |  tier 与相关性均由规则管线判定"
+    note = ui_text(
+        "完整链接见配套 digest.txt  |  tier 与相关性均由规则管线判定",
+        "Full links in digest.txt  |  tier and relevance are rule-based",
+    )
     draw.text((MARGIN_X, HEIGHT - 34), note, font=note_font, fill=MUTED)
 
     out = OUTPUT_DIR / "perovskite-scout-card.png"
@@ -384,11 +484,11 @@ def render_html(top: list[dict], today: str) -> list[Path]:
         ".industry-h{color:#315f4a;font-size:30px;margin:40px 0 10px}"
         ".foot{margin-top:32px;color:#315f4a}"
         "</style></head><body><main class='wrap'>"
-        f"<div class='rule'><span class='digest'>Research Digest</span></div><h1>钙钛矿情报雷达</h1>"
+        f"<div class='rule'><span class='digest'>Research Digest</span></div><h1>{ui_text('钙钛矿情报雷达', 'Perovskite Scout')}</h1>"
         f"<div class='under'></div><div class='top'>Top 5 / {html.escape(today)}</div>"
         + "".join(cards)
-        + ("<div class='industry-h'>产业动态</div>" + "".join(ind_cards) if ind_cards else "")
-        + "<div class='foot'>source verified | 完整链接见配套 digest.txt</div></main></body></html>"
+        + (f"<div class='industry-h'>{ui_text('产业动态', 'Industry Signals')}</div>" + "".join(ind_cards) if ind_cards else "")
+        + f"<div class='foot'>source verified | {ui_text('完整链接见配套 digest.txt', 'Full links in digest.txt')}</div></main></body></html>"
     )
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     out = OUTPUT_DIR / "perovskite-scout-card.html"
@@ -422,6 +522,8 @@ def main() -> int:
 
     clean_old_outputs()
     if PIL_OK:
+        if not CJK_IMAGE_TEXT:
+            print("WARNING: no CJK font found; card image uses English labels. Install Noto Sans CJK for Chinese image labels.")
         files = render_pil(top, today)
         print(f"Pillow OK, generated {len(files)} card image(s):")
     else:
