@@ -1,25 +1,25 @@
-"""image_renderer.py — MVP 图片卡片 (Top 5)。
+"""Render the perovskite scout Top 5 card.
 
-输入: feed-papers.json
-输出: output/perovskite-scout-card.png (超长分页 card-part-N.png)
-      环境无 Pillow 时退回 output/perovskite-scout-card.html (不卡住)
+Input: feed-papers.json
+Output: output/perovskite-scout-card.png when Pillow is available.
+Fallback: output/perovskite-scout-card.html when Pillow is unavailable.
 
-约束 (MVP 红线):
-  - 不调用 LLM
-  - 图片内不含完整链接: 仅标题/日期/tier/score/作者简写/短摘要
-  - 链接仍由 text_renderer 的 digest.txt 补发
-  - 排序逻辑复用 text_renderer: score>=TOP_MIN_SCORE 优先, 按 score/date 排, 封顶 TOP_N
+The visual direction follows the "academic editorial / research digest" mockup:
+warm paper background, restrained typography, thin rules, small crystalline
+accents, and source-verification cues. No LLM is used.
 """
 
+from __future__ import annotations
+
+import html
 import json
 import re
 import sys
 import time
 from pathlib import Path
 
-# 复用 text_renderer 的阈值, 保证 Top 5 与纯文本简报一致
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from text_renderer import TOP_N, TOP_MIN_SCORE  # noqa: E402
+from text_renderer import TOP_MIN_SCORE, TOP_N  # noqa: E402
 from text_utils import sanitize_text, safe_reconfigure_stdout  # noqa: E402
 
 try:
@@ -29,239 +29,312 @@ try:
 except ImportError:
     PIL_OK = False
 
+
 BASE = Path(__file__).resolve().parent.parent
 FEED_PATH = BASE / "feed-papers.json"
 OUTPUT_DIR = BASE / "output"
 
 WIDTH = 1080
-PADDING = 60
-CONTENT_W = WIDTH - 2 * PADDING
-MAX_PAGE_HEIGHT = 4000
-HEADER_H = 170
-FOOTER_H = 70
+HEIGHT = 1600
+MARGIN_X = 82
+
+PAPER = (247, 243, 235)
+INK = (29, 33, 36)
+MUTED = (105, 111, 108)
+HAIRLINE = (188, 187, 177)
+GREEN = (49, 95, 74)
+BLUE = (92, 129, 150)
+AMBER = (213, 151, 42)
+GREY = (128, 132, 128)
 
 TIER_COLORS = {
-    "T1": (26, 127, 55),
-    "T2": (9, 105, 218),
-    "T3": (154, 103, 0),
-    "T4": (110, 119, 129),
+    "T1": GREEN,
+    "T2": BLUE,
+    "T3": AMBER,
+    "T4": GREY,
 }
-COL_BG = (255, 255, 255)
-COL_TEXT = (31, 35, 40)
-COL_SUB = (101, 109, 118)
-COL_LINE = (222, 226, 230)
 
-FONT_CANDIDATES = [
-    "C:/Windows/Fonts/msyh.ttc",
-    "C:/Windows/Fonts/simhei.ttf",
-    "C:/Windows/Fonts/simsun.ttc",
-    "C:/Windows/Fonts/msyhbd.ttc",
-]
+FONT_PATHS = {
+    "title": [
+        "C:/Windows/Fonts/simsun.ttc",
+        "C:/Windows/Fonts/msyhbd.ttc",
+        "C:/Windows/Fonts/msyh.ttc",
+    ],
+    "body": [
+        "C:/Windows/Fonts/msyh.ttc",
+        "C:/Windows/Fonts/simhei.ttf",
+        "C:/Windows/Fonts/simsun.ttc",
+    ],
+    "bold": [
+        "C:/Windows/Fonts/msyhbd.ttc",
+        "C:/Windows/Fonts/simhei.ttf",
+        "C:/Windows/Fonts/msyh.ttc",
+    ],
+    "serif": [
+        "C:/Windows/Fonts/georgia.ttf",
+        "C:/Windows/Fonts/times.ttf",
+        "C:/Windows/Fonts/msyh.ttc",
+    ],
+}
 
 
-def load_font(size: int):
-    for p in FONT_CANDIDATES:
-        if Path(p).exists():
+def load_font(size: int, role: str = "body"):
+    for path in FONT_PATHS.get(role, FONT_PATHS["body"]):
+        if Path(path).exists():
             try:
-                return ImageFont.truetype(p, size)
-            except Exception:
+                return ImageFont.truetype(path, size)
+            except OSError:
                 continue
     return ImageFont.load_default()
 
 
-def wrap_text(text: str, font, max_width: int) -> list:
+def text_w(font, text: str) -> float:
+    return font.getlength(text)
+
+
+def wrap_text(text: str, font, max_width: int, max_lines: int | None = None) -> list[str]:
+    text = sanitize_text(text or "").replace("\n", " ").strip()
+    if not text:
+        return [""]
+
     tokens = re.findall(r"[\u4e00-\u9fff]|[^\u4e00-\u9fff\s]+|\s+", text)
-    lines, cur = [], ""
+    lines: list[str] = []
+    cur = ""
     for tok in tokens:
-        test = cur + tok
-        if font.getlength(test.replace("\n", "")) <= max_width:
-            cur = test
-        else:
-            if cur.strip():
-                lines.append(cur.rstrip())
-            cur = tok if tok.strip() else ""
-    if cur.strip():
-        lines.append(cur.rstrip())
+        trial = cur + tok
+        if text_w(font, trial.strip()) <= max_width:
+            cur = trial
+            continue
+        if cur.strip():
+            lines.append(cur.strip())
+        cur = tok if tok.strip() else ""
+        if max_lines and len(lines) >= max_lines:
+            break
+    if cur.strip() and (not max_lines or len(lines) < max_lines):
+        lines.append(cur.strip())
+
+    if max_lines and len(lines) > max_lines:
+        lines = lines[:max_lines]
+    if max_lines and lines and text_w(font, lines[-1]) > max_width:
+        lines[-1] = ellipsize(lines[-1], font, max_width)
+    elif max_lines and len(lines) == max_lines:
+        joined = "".join(lines)
+        if len(joined) < len(text.replace(" ", "")):
+            lines[-1] = ellipsize(lines[-1], font, max_width)
     return lines or [""]
 
 
-def fmt_authors(authors: list) -> str:
+def ellipsize(text: str, font, max_width: int) -> str:
+    suffix = "..."
+    while text and text_w(font, text + suffix) > max_width:
+        text = text[:-1]
+    return (text.rstrip() + suffix) if text else suffix
+
+
+def fmt_authors(authors: list[str]) -> str:
     if not authors:
-        return "未知"
-    return authors[0] + " et al." if len(authors) > 1 else authors[0]
+        return "Unknown authors"
+    first = sanitize_text(str(authors[0]))
+    return f"{first} et al." if len(authors) > 1 else first
 
 
-def short_summary(abstract: str) -> str:
-    text = (abstract or "").replace("\n", " ").strip()
-    return text[:120] + "…" if len(text) > 120 else text
+def short_summary(abstract: str, chars: int = 150) -> str:
+    text = sanitize_text(abstract or "").replace("\n", " ").strip()
+    return text[:chars].rstrip() + "..." if len(text) > chars else text
 
 
-def sort_top(items: list) -> list:
+def sort_top(items: list[dict]) -> list[dict]:
     items_sorted = sorted(
         items,
         key=lambda x: (x.get("relevance_score", 0), x.get("published_date", "")),
         reverse=True,
     )
     qualified = [it for it in items_sorted if (it.get("relevance_score") or 0) >= TOP_MIN_SCORE]
-    capped = qualified[:TOP_N]
-    top = list(capped)
+    top = qualified[:TOP_N]
     if len(top) < TOP_N:
-        top_ids = {id(it) for it in capped}
+        used = {id(it) for it in top}
         for it in items_sorted:
-            if id(it) not in top_ids:
+            if id(it) not in used:
                 top.append(it)
                 if len(top) >= TOP_N:
                     break
     return top
 
 
-# ---------- PIL 渲染路径 ----------
-
-def measure_item(it: dict, fonts: tuple) -> int:
-    title_font, meta_font, sum_font, _ = fonts
-    h = 16
-    tl = wrap_text(it.get("title", "(无标题)"), title_font, CONTENT_W - 90)
-    h += len(tl) * (title_font.size + 8) + 10
-    h += meta_font.size + 8
-    sl = wrap_text(short_summary(it.get("abstract", "")), sum_font, CONTENT_W)
-    h += len(sl) * (sum_font.size + 6) + 24
-    return h
+def rounded_rectangle(draw, box, radius, fill, outline=None, width=1):
+    draw.rounded_rectangle(box, radius=radius, fill=fill, outline=outline, width=width)
 
 
-def draw_item(draw, it: dict, x: int, y: int, fonts: tuple) -> int:
-    title_font, meta_font, sum_font, badge_font = fonts
-    tier = str(it.get("provenance_tier", "T?"))[:2]
-    color = TIER_COLORS.get(tier, COL_SUB)
-    title = sanitize_text(it.get("title", "(无标题)"))
+def add_paper_texture(img: Image.Image) -> None:
+    pix = img.load()
+    w, h = img.size
+    for y in range(0, h, 3):
+        for x in range(0, w, 3):
+            delta = ((x * 17 + y * 31) % 7) - 3
+            r, g, b = pix[x, y]
+            pix[x, y] = (
+                max(0, min(255, r + delta)),
+                max(0, min(255, g + delta)),
+                max(0, min(255, b + delta)),
+            )
 
-    bw, bh = 66, 42
-    draw.rounded_rectangle([x, y, x + bw, y + bh], radius=8, fill=color)
-    bt = tier
+
+def draw_source_mark(draw: ImageDraw.ImageDraw, x: int, y: int, font) -> None:
+    draw.ellipse([x, y, x + 46, y + 46], outline=GREEN, width=2)
+    draw.line([(x + 23, y - 10), (x + 23, y + 8)], fill=GREEN, width=2)
+    draw.line([(x + 23, y + 38), (x + 23, y + 56)], fill=GREEN, width=2)
+    draw.line([(x - 10, y + 23), (x + 8, y + 23)], fill=GREEN, width=2)
+    draw.line([(x + 38, y + 23), (x + 56, y + 23)], fill=GREEN, width=2)
+    draw.line([(x + 13, y + 24), (x + 21, y + 32), (x + 34, y + 15)], fill=GREEN, width=3)
+    draw.text((x + 76, y + 6), "source verified", font=font, fill=GREEN)
+    wave_x = x + 500
+    draw.line([(wave_x, y + 24), (wave_x + 78, y + 24), (wave_x + 102, y + 2), (wave_x + 130, y + 46), (wave_x + 154, y + 24), (wave_x + 238, y + 24)], fill=GREEN, width=2)
+    draw.ellipse([wave_x + 236, y + 21, wave_x + 242, y + 27], fill=GREEN)
+
+
+def draw_header(draw: ImageDraw.ImageDraw, today: str) -> None:
+    title_font = load_font(72, "title")
+    label_font = load_font(26, "serif")
+    sub_font = load_font(33, "serif")
+    small_font = load_font(23, "body")
+
+    draw.line([(52, 64), (760, 64)], fill=HAIRLINE, width=2)
+    draw.line([(52, 48), (52, 80)], fill=HAIRLINE, width=2)
+    draw.ellipse([42, 54, 62, 74], outline=HAIRLINE, width=2)
+    draw.text((820, 48), "Research Digest", font=label_font, fill=GREEN)
+
+    draw.text((MARGIN_X, 150), "钙钛矿情报雷达", font=title_font, fill=INK)
+    draw.line([(MARGIN_X, 246), (690, 246)], fill=INK, width=2)
+    draw.ellipse([688, 242, 696, 250], fill=INK)
+
+    draw.text((MARGIN_X, 300), "Top 5", font=sub_font, fill=GREEN)
+    draw.line([(MARGIN_X, 348), (176, 348)], fill=AMBER, width=4)
+    draw.text((MARGIN_X, 372), f"{today}  |  score >= {TOP_MIN_SCORE} prioritized", font=small_font, fill=MUTED)
+
+    # Keep the masthead intentionally sparse. The earlier decorative molecule
+    # and solar-stack sketch looked too literal once real content was rendered.
+    draw.line([(782, 112), (946, 112)], fill=(205, 199, 185), width=1)
+    draw.text((782, 140), "PVSC", font=label_font, fill=GREEN)
+    draw.text((782, 176), "verified papers", font=small_font, fill=MUTED)
+
+
+def draw_item(draw: ImageDraw.ImageDraw, item: dict, idx: int, y: int) -> int:
+    num_font = load_font(42, "serif")
+    title_font = load_font(28, "bold")
+    meta_font = load_font(20, "body")
+    summary_font = load_font(21, "body")
+    tier_font = load_font(22, "bold")
+
+    left_x = MARGIN_X
+    line_x = left_x + 78
+    content_x = left_x + 112
+    row_w = WIDTH - content_x - MARGIN_X
+    row_h = 166
+
+    draw.text((left_x, y + 14), f"{idx:02d}", font=num_font, fill=GREEN)
+    draw.line([(line_x, y + 8), (line_x, y + row_h - 16)], fill=HAIRLINE, width=2)
+    draw.ellipse([line_x - 5, y + 80, line_x + 5, y + 90], fill=GREEN)
+
+    tier = str(item.get("provenance_tier", "T?"))[:2]
+    tier_color = TIER_COLORS.get(tier, GREY)
+    pill = [content_x, y + 12, content_x + 58, y + 48]
+    rounded_rectangle(draw, pill, 18, fill=tier_color)
     draw.text(
-        (x + (bw - badge_font.getlength(bt)) / 2, y + (bh - badge_font.size) / 2),
-        bt,
-        font=badge_font,
+        (pill[0] + (58 - text_w(tier_font, tier)) / 2, pill[1] + 5),
+        tier,
+        font=tier_font,
         fill=(255, 255, 255),
     )
 
-    tl = wrap_text(title, title_font, CONTENT_W - 90)
-    ty = y
-    for line in tl:
-        draw.text((x + bw + 16, ty), line, font=title_font, fill=COL_TEXT)
-        ty += title_font.size + 8
+    title_x = content_x + 82
+    title = sanitize_text(item.get("title", "(untitled)"))
+    title_lines = wrap_text(title, title_font, row_w - 82, max_lines=2)
+    ty = y + 8
+    for line in title_lines:
+        draw.text((title_x, ty), line, font=title_font, fill=INK)
+        ty += 34
 
-    date = it.get("published_date", "")
-    meta = f"{date}｜{fmt_authors(it.get('authors', []))}｜{it.get('relevance_score', '')}"
-    draw.text((x, ty + 6), meta, font=meta_font, fill=COL_SUB)
-    my = ty + 6 + meta_font.size + 8
+    source = item.get("corresponding_source") or "arXiv"
+    meta = f"{item.get('published_date', '')}  |  {fmt_authors(item.get('authors', []))}  |  score {item.get('relevance_score', '')}  |  {source}"
+    draw.text((title_x, y + 82), ellipsize(meta, meta_font, row_w - 82), font=meta_font, fill=MUTED)
 
-    sl = wrap_text(short_summary(sanitize_text(it.get("abstract", ""))), sum_font, CONTENT_W)
-    sy = my
-    for line in sl:
-        draw.text((x, sy), line, font=sum_font, fill=COL_SUB)
-        sy += sum_font.size + 6
+    summary = short_summary(item.get("abstract", ""))
+    summary_lines = wrap_text(summary, summary_font, row_w - 20, max_lines=1)
+    sy = y + 114
+    for line in summary_lines:
+        draw.text((content_x, sy), line, font=summary_font, fill=(119, 119, 112))
+        sy += 28
 
-    sep_y = sy + 12
-    draw.line([(x, sep_y), (x + CONTENT_W, sep_y)], fill=COL_LINE, width=2)
-    return sep_y + 16
+    draw.line([(MARGIN_X, y + row_h), (WIDTH - MARGIN_X, y + row_h)], fill=HAIRLINE, width=2)
+    return y + row_h + 28
 
 
-def render_pil(top: list, today: str) -> list:
-    fonts = (load_font(34), load_font(28), load_font(26), load_font(24))
-    header_font, sub_font = load_font(48), load_font(30)
-
-    # 分页
-    pages, cur, cur_h = [], [], HEADER_H + FOOTER_H
-    for it in top:
-        ih = measure_item(it, fonts)
-        if cur and cur_h + ih > MAX_PAGE_HEIGHT:
-            pages.append(cur)
-            cur, cur_h = [], HEADER_H + FOOTER_H
-        cur.append(it)
-        cur_h += ih
-    if cur:
-        pages.append(cur)
-
+def render_pil(top: list[dict], today: str) -> list[Path]:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    files = []
-    for pi, pg in enumerate(pages, 1):
-        h = HEADER_H + FOOTER_H + sum(measure_item(it, fonts) for it in pg) + 10
-        img = Image.new("RGB", (WIDTH, h), COL_BG)
-        d = ImageDraw.Draw(img)
+    img = Image.new("RGB", (WIDTH, HEIGHT), PAPER)
+    add_paper_texture(img)
+    draw = ImageDraw.Draw(img)
 
-        # header
-        d.text((PADDING, 30), f"钙钛矿情报雷达 {today}", font=header_font, fill=COL_TEXT)
-        d.text((PADDING, 92), f"本周重点 Top {len(top)} (评分≥{TOP_MIN_SCORE} 优先)", font=sub_font, fill=COL_SUB)
-        d.line([(PADDING, HEADER_H - 14), (PADDING + CONTENT_W, HEADER_H - 14)], fill=COL_LINE, width=3)
+    draw_header(draw, today)
 
-        y = HEADER_H
-        for it in pg:
-            y = draw_item(d, it, PADDING, y, fonts)
+    y = 470
+    for idx, item in enumerate(top, 1):
+        y = draw_item(draw, item, idx, y)
 
-        # footer
-        foot = "完整链接见配套 digest.txt"
-        if len(pages) > 1:
-            foot += f"  ·  {pi}/{len(pages)}"
-        d.text((PADDING, h - FOOTER_H + 20), foot, font=sub_font, fill=COL_SUB)
+    foot_font = load_font(23, "serif")
+    draw_source_mark(draw, MARGIN_X, HEIGHT - 92, foot_font)
 
-        out = OUTPUT_DIR / (
-            f"perovskite-scout-card-part-{pi}.png" if len(pages) > 1 else "perovskite-scout-card.png"
-        )
-        img.save(out)
-        files.append(out)
-    return files
+    note_font = load_font(20, "body")
+    note = "完整链接见配套 digest.txt  |  tier 与相关性均由规则管线判定"
+    draw.text((MARGIN_X, HEIGHT - 34), note, font=note_font, fill=MUTED)
 
-
-# ---------- HTML 退回路径 (无 Pillow) ----------
-
-def render_html(top: list, today: str) -> list:
-    cards = []
-    for it in top:
-        tier = str(it.get("provenance_tier", "T?"))[:2]
-        color = "#%02x%02x%02x" % TIER_COLORS.get(tier, COL_SUB)
-        cards.append(
-            f'<div class="card">'
-            f'<span class="badge" style="background:{color}">{tier}</span>'
-            f'<div class="title">{it.get("title","(无标题)")}</div>'
-            f'<div class="meta">{it.get("published_date","")}｜{fmt_authors(it.get("authors",[]))}｜{it.get("relevance_score","")}</div>'
-            f'<div class="sum">{short_summary(it.get("abstract",""))}</div>'
-            f"</div>"
-        )
-    html = (
-        "<!doctype html><html lang='zh'><head><meta charset='utf-8'>"
-        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-        f"<title>钙钛矿情报雷达 {today}</title><style>"
-        "body{font-family:'Microsoft YaHei',sans-serif;background:#fff;margin:0;padding:24px;}"
-        ".head{font-size:24px;font-weight:700;margin-bottom:4px;}"
-        ".sub{color:#656d76;margin-bottom:16px;}"
-        ".card{border:1px solid #dee2e6;border-radius:10px;padding:14px;margin-bottom:14px;}"
-        ".badge{display:inline-block;color:#fff;border-radius:6px;padding:2px 8px;font-size:13px;font-weight:700;}"
-        ".title{font-size:17px;font-weight:700;margin:8px 0 4px;}"
-        ".meta{color:#656d76;font-size:13px;margin-bottom:6px;}"
-        ".sum{color:#656d76;font-size:14px;line-height:1.5;}"
-        ".foot{color:#656d76;font-size:13px;margin-top:8px;}"
-        "</style></head><body>"
-        f"<div class='head'>钙钛矿情报雷达 {today}</div>"
-        f"<div class='sub'>本周重点 Top {len(top)} (评分≥{TOP_MIN_SCORE} 优先) · 完整链接见配套 digest.txt</div>"
-        + "".join(cards)
-        + "</body></html>"
-    )
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    out = OUTPUT_DIR / "perovskite-scout-card.html"
-    out.write_text(html, encoding="utf-8")
+    out = OUTPUT_DIR / "perovskite-scout-card.png"
+    img.save(out)
     return [out]
 
 
-def main() -> int:
-    safe_reconfigure_stdout()  # Windows GBK 终端下避免打印中文/特殊符号时崩溃
-    if not FEED_PATH.exists():
-        print(f"ERROR: {FEED_PATH} 不存在, 请先运行 discover_papers.py", file=sys.stderr)
-        return 1
-    feed = json.load(open(FEED_PATH, encoding="utf-8"))
-    top = sort_top(feed.get("items", []))
-    today = time.strftime("%Y-%m-%d")
+def render_html(top: list[dict], today: str) -> list[Path]:
+    cards = []
+    for idx, item in enumerate(top, 1):
+        tier = str(item.get("provenance_tier", "T?"))[:2]
+        color = "#%02x%02x%02x" % TIER_COLORS.get(tier, GREY)
+        cards.append(
+            "<section class='item'>"
+            f"<div class='num'>{idx:02d}</div>"
+            f"<div class='body'><span class='tier' style='background:{color}'>{html.escape(tier)}</span>"
+            f"<h2>{html.escape(sanitize_text(item.get('title', '(untitled)')))}</h2>"
+            f"<p class='meta'>{html.escape(item.get('published_date', ''))} | "
+            f"{html.escape(fmt_authors(item.get('authors', [])))} | "
+            f"score {html.escape(str(item.get('relevance_score', '')))}</p>"
+            f"<p>{html.escape(short_summary(item.get('abstract', '')))}</p></div>"
+            "</section>"
+        )
+    page = (
+        "<!doctype html><html lang='zh-CN'><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+        "<style>"
+        "body{margin:0;background:#f7f3eb;color:#1d2124;font-family:Georgia,'Microsoft YaHei',serif;}"
+        ".wrap{max-width:920px;margin:0 auto;padding:56px 72px 44px;}"
+        ".rule{border-top:1px solid #aaa;margin-bottom:54px}.digest{float:right;color:#315f4a}"
+        "h1{font-size:64px;margin:0 0 20px}.under{height:2px;background:#1d2124;width:580px;margin-bottom:48px}"
+        ".top{color:#315f4a;font-size:32px;margin-bottom:34px}"
+        ".item{display:grid;grid-template-columns:80px 1fr;gap:28px;border-bottom:1px solid #bbb;padding:24px 0}"
+        ".num{font-size:42px;color:#315f4a}.tier{color:#fff;border-radius:18px;padding:4px 13px;font-weight:700}"
+        "h2{font:700 25px 'Microsoft YaHei',sans-serif;margin:12px 0 8px}.meta,p{font:18px/1.55 'Microsoft YaHei',sans-serif;color:#666}"
+        ".foot{margin-top:32px;color:#315f4a}"
+        "</style></head><body><main class='wrap'>"
+        f"<div class='rule'><span class='digest'>Research Digest</span></div><h1>钙钛矿情报雷达</h1>"
+        f"<div class='under'></div><div class='top'>Top 5 / {html.escape(today)}</div>"
+        + "".join(cards)
+        + "<div class='foot'>source verified | 完整链接见配套 digest.txt</div></main></body></html>"
+    )
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    out = OUTPUT_DIR / "perovskite-scout-card.html"
+    out.write_text(page, encoding="utf-8")
+    return [out]
 
-    # 清理旧卡片产物, 避免投递错文件
+
+def clean_old_outputs() -> None:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     for pat in (
         "perovskite-scout-card.png",
@@ -274,17 +347,26 @@ def main() -> int:
             except OSError:
                 pass
 
-    if not PIL_OK:
-        files = render_html(top, today)
-        print("Pillow 不可用, 已退回 HTML:")
-        for f in files:
-            print(f"  {f}")
-        return 0
 
-    files = render_pil(top, today)
-    print(f"Pillow OK, 生成 {len(files)} 张卡片图:")
-    for f in files:
-        print(f"  {f}")
+def main() -> int:
+    safe_reconfigure_stdout()
+    if not FEED_PATH.exists():
+        print(f"ERROR: {FEED_PATH} does not exist; run scripts/discover_papers.py first", file=sys.stderr)
+        return 1
+
+    feed = json.load(open(FEED_PATH, encoding="utf-8"))
+    top = sort_top(feed.get("items", []))
+    today = time.strftime("%Y-%m-%d")
+
+    clean_old_outputs()
+    if PIL_OK:
+        files = render_pil(top, today)
+        print(f"Pillow OK, generated {len(files)} card image(s):")
+    else:
+        files = render_html(top, today)
+        print("Pillow unavailable, generated HTML fallback:")
+    for file in files:
+        print(f"  {file}")
     return 0
 
 
