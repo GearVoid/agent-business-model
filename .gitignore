@@ -3,3 +3,18 @@ assets/
 qa-*.png
 slides.html
 AGENTS.md
+
+# ---- perovskite-scout 运行时产物（每次跑管线重新生成，不入库）----
+.workbuddy/
+__pycache__/
+feed-papers.json
+feed-industry.json
+rejected-papers.json
+rejected-industry.json
+state-feed.json
+state-industry.json
+output/perovskite-scout-card.png
+output/perovskite-scout-card.html
+output/perovskite-scout-digest.txt
+output/perovskite-scout-digest-part-*.txt
+output/delivery/

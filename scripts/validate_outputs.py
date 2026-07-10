@@ -21,11 +21,14 @@ sys.path.insert(0, str(SCRIPTS))
 from text_renderer import TOP_N, TOP_MIN_SCORE  # 复用排序逻辑
 from text_utils import safe_reconfigure_stdout  # noqa: E402
 from enrich_metadata import load_openalex_mailto  # noqa: E402
+from feed_dedup import build_signatures, is_dup_of_papers  # noqa: E402
 
 ENRICH_CONFIG = BASE / "config" / "enrich.json"
 
 FEED = BASE / "feed-papers.json"
 REJECTED = BASE / "rejected-papers.json"
+FEED_INDUSTRY = BASE / "feed-industry.json"
+REJECTED_INDUSTRY = BASE / "rejected-industry.json"
 OUTPUT = BASE / "output"
 
 REQUIRED = [
@@ -64,6 +67,11 @@ def sort_top(items: list) -> list:
 
 def main() -> int:
     safe_reconfigure_stdout()  # Windows GBK 终端下避免打印中文/特殊符号时崩溃
+    # 定时投递场景下, 某周 arXiv/行业可能确实无新命中 (feed 合法为空)。
+    # 设 ALLOW_EMPTY_FEED=1 时, 把两个「非空」硬检查降级为通过, 避免安静周卡住投递;
+    # 其它所有检查 (字段/乱码/tier/跨 feed 去重/卡片) 仍严格。默认 (未设) 保持开发态严格。
+    # 必须在 main() 内读取, 因为 deliver.py 在 import 之后才设置该环境变量。
+    ALLOW_EMPTY_FEED = os.environ.get("ALLOW_EMPTY_FEED") == "1"
     feed_items = []
     top = []
 
@@ -74,7 +82,10 @@ def main() -> int:
         try:
             feed = json.load(open(FEED, encoding="utf-8"))
             feed_items = feed.get("items", [])
-            check("feed 合法 JSON 且非空", bool(feed_items), f"count={feed.get('count')}")
+            if ALLOW_EMPTY_FEED and not feed_items:
+                check("feed 合法 JSON 且非空", True, "允许为空(定时模式)")
+            else:
+                check("feed 合法 JSON 且非空", bool(feed_items), f"count={feed.get('count')}")
 
             missing = [it.get("id") for it in feed_items if not all(k in it for k in REQUIRED)]
             check("feed 每条含必需字段", not missing, f"缺字段: {missing[:3]}")
@@ -133,6 +144,76 @@ def main() -> int:
     else:
         check("rejected-papers.json 存在", False)
 
+    # ---- feed-industry ----
+    industry_items = []
+    if FEED_INDUSTRY.exists():
+        try:
+            ifeed = json.load(open(FEED_INDUSTRY, encoding="utf-8"))
+            industry_items = ifeed.get("items", [])
+            if ALLOW_EMPTY_FEED and not industry_items:
+                check("feed-industry 合法 JSON 且非空", True, "允许为空(定时模式)")
+            else:
+                check("feed-industry 合法 JSON 且非空", bool(industry_items),
+                      f"count={ifeed.get('count')}")
+
+            IREQ = ["id", "title", "url", "source_id", "source_name", "source_type",
+                    "source_domain", "provenance_tier", "provenance_subtier",
+                    "type", "published_date", "summary", "authors", "keep", "doi"]
+            imiss = [it.get("id") for it in industry_items if not all(k in it for k in IREQ)]
+            check("feed-industry 每条含必需字段", not imiss, f"缺: {imiss[:3]}")
+
+            from tier_mapper import tier_for_url
+            itier_bad = [
+                it.get("id")
+                for it in industry_items
+                if it.get("provenance_tier") != tier_for_url(it.get("url", ""))
+            ]
+            check("industry tier 由 tier_mapper 机器判定", not itier_bad, f"不符: {itier_bad[:3]}")
+
+            isub_bad = [
+                it.get("id")
+                for it in industry_items
+                if it.get("provenance_subtier") not in (None, "curated-media", "official-newsroom")
+            ]
+            check("industry provenance_subtier 取值合法", not isub_bad, f"异常: {isub_bad[:3]}")
+
+            idoi_bad = [
+                it.get("id")
+                for it in industry_items
+                if not isinstance(it.get("doi"), (str, type(None)))
+            ]
+            check("industry doi 字段合法(str/None)", not idoi_bad, f"异常: {idoi_bad[:3]}")
+
+            igarble = [
+                it.get("id")
+                for it in industry_items
+                if "\ufffd" in (it.get("title", "") or "") or "\ufffd" in (it.get("summary", "") or "")
+            ]
+            check("feed-industry 无乱码(U+FFFD)", not igarble, f"命中: {igarble[:3]}")
+        except Exception as e:  # noqa: BLE001
+            check("feed-industry 解析", False, str(e))
+    else:
+        check("feed-industry.json 存在", False)
+
+    # ---- 跨 feed 去重: industry 不得与 papers 重复 (归一标题 / URL / DOI) ----
+    if industry_items and feed_items:
+        st, su, sd = build_signatures(feed_items)
+        dups = []
+        for it in industry_items:
+            r = is_dup_of_papers(it, st, su, sd)
+            if r:
+                dups.append((it.get("id"), r))
+        check("跨 feed 无重复 (标题/URL/DOI)", not dups, f"重复: {dups[:3]}")
+
+    # ---- rejected-industry ----
+    if REJECTED_INDUSTRY.exists():
+        rij = json.load(open(REJECTED_INDUSTRY, encoding="utf-8"))
+        ritems = rij.get("items", [])
+        no_reason = [it.get("id") or it.get("source_id") for it in ritems if not it.get("reject_reason")]
+        check("rejected-industry 每条含 reject_reason", not no_reason, f"缺: {no_reason[:3]}")
+    else:
+        check("rejected-industry.json 存在", False)
+
     # ---- digest ----
     digest = OUTPUT / "perovskite-scout-digest.txt"
     if digest.exists():
@@ -144,6 +225,12 @@ def main() -> int:
         hit = [k for k in FORBID if k.lower() in t.lower()]
         check("digest 无噪声禁词", not hit, f"命中: {hit}")
         check("digest 无乱码(U+FFFD)", "\ufffd" not in t)
+        if industry_items:
+            check("digest 含产业动态区", "产业动态" in t)
+            if "产业动态" in t:
+                seg = t.split("产业动态", 1)[1]
+                bullets = [l for l in seg.splitlines() if l.strip().startswith("- ")]
+                check("digest 产业动态条数 ≤ 5", len(bullets) <= 5, f"条数={len(bullets)}")
     else:
         check("digest.txt 存在", False)
 

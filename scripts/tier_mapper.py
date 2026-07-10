@@ -57,6 +57,8 @@ _MEDIA = {
     "www.pv-tech.org",
     "greentechmedia.com",
     "solarmagazine.com",
+    "perovskite-info.com",
+    "www.perovskite-info.com",
 }
 
 # 社媒 / 未知 -> T4

@@ -19,11 +19,13 @@ from text_utils import sanitize_text, safe_reconfigure_stdout
 BASE = Path(__file__).resolve().parent.parent
 FEED_PATH = BASE / "feed-papers.json"
 REJECTED_PATH = BASE / "rejected-papers.json"
+INDUSTRY_FEED_PATH = BASE / "feed-industry.json"
 OUTPUT_DIR = BASE / "output"
 
 TOP_N = 5            # 简报展示的重点条数 (可调)
 TOP_MIN_SCORE = 0.7   # 重点条门槛: 仅 score >= 此值的进 Top; 不足则补余下最高分
 SUMMARY_CHARS = 180  # 一句话摘要截断字符数
+INDUSTRY_TOP_N = 5   # 产业动态区展示条数 (文本可多放, 图片只放 2)
 PAGE_LIMIT = 3500    # 单页最大字符数, 超出自动分页
 
 
@@ -61,6 +63,33 @@ def render_item(it: dict, idx: int | None = None) -> str:
     if idx is not None:
         lines.insert(0, f"{idx}.")
     return "\n".join(lines)
+
+
+def sort_industry(items: list[dict]) -> list[dict]:
+    """产业动态排序: curated-media / official-newsroom 优先, 其次按日期新到旧。
+
+    用两次稳定排序: 先按日期降序, 再按 subtier 排名升序 (Python sort 稳定,
+    同排名内保持日期顺序)。
+    """
+    rank = {"curated-media": 0, "official-newsroom": 1}
+    items = sorted(items, key=lambda it: it.get("published_date", ""), reverse=True)
+    items = sorted(items, key=lambda it: rank.get(it.get("provenance_subtier") or "", 2))
+    return items
+
+
+def render_industry_item(it: dict) -> str:
+    src = it.get("source_name", "")
+    title = sanitize_text(it.get("title", "(无标题)"))
+    date = it.get("published_date", "")
+    url = it.get("url", "")
+    summary = ""
+    if it.get("summary"):
+        summary = "｜" + sanitize_text(it["summary"])[:80]
+    return "\n".join([
+        f"- {src}：{title}",
+        f"  {date}{summary}",
+        f"  {url}",
+    ])
 
 
 def main() -> int:
@@ -104,9 +133,25 @@ def main() -> int:
         blocks.append(render_item(it, idx=i))
     if remaining > 0:
         blocks.append(f"… 其余 {remaining} 条见 feed-papers.json")
+
+    # ---- 产业动态区 ----
+    blocks.append(f"产业动态 (Top {INDUSTRY_TOP_N})")
+    industry_items: list[dict] = []
+    if INDUSTRY_FEED_PATH.exists():
+        try:
+            ifeed = json.load(open(INDUSTRY_FEED_PATH, encoding="utf-8"))
+            industry_items = sort_industry(ifeed.get("items", []))[:INDUSTRY_TOP_N]
+        except Exception:
+            industry_items = []
+    if industry_items:
+        for it in industry_items:
+            blocks.append(render_industry_item(it))
+    else:
+        blocks.append("（本期无行业动态）")
+
     footer = (
         f"\n本次新发现 {new_count} 条；过滤 {filtered_count} 条；"
-        f"完整列表见 feed-papers.json / rejected-papers.json"
+        f"完整列表见 feed-papers.json / feed-industry.json / rejected-*.json"
     )
 
     # 分页: 在块边界切分, 每页 <= PAGE_LIMIT
@@ -138,15 +183,17 @@ def main() -> int:
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     page_files: list[Path] = []
-    if len(pages) == 1:
-        out = OUTPUT_DIR / "perovskite-scout-digest.txt"
-        out.write_text(pages[0], encoding="utf-8")
-        page_files = [out]
-    else:
+    # 始终写一份完整 digest.txt (供复制 / 校验); 超出 PAGE_LIMIT 时再额外写分页件,
+    # 用于微信分多条发送。两份内容一致, 只是分页件按块边界切过。
+    full_text = "\n\n".join(pages)
+    out = OUTPUT_DIR / "perovskite-scout-digest.txt"
+    out.write_text(full_text, encoding="utf-8")
+    page_files = [out]
+    if len(pages) > 1:
         for i, p in enumerate(pages, 1):
-            out = OUTPUT_DIR / f"perovskite-scout-digest-part-{i}.txt"
-            out.write_text(p, encoding="utf-8")
-            page_files.append(out)
+            po = OUTPUT_DIR / f"perovskite-scout-digest-part-{i}.txt"
+            po.write_text(p, encoding="utf-8")
+            page_files.append(po)
 
     # 控制台输出 (可直接复制)
     print("=" * 44)

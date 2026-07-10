@@ -32,11 +32,13 @@ except ImportError:
 
 BASE = Path(__file__).resolve().parent.parent
 FEED_PATH = BASE / "feed-papers.json"
+FEED_INDUSTRY_PATH = BASE / "feed-industry.json"
 OUTPUT_DIR = BASE / "output"
 
 WIDTH = 1080
-HEIGHT = 1600
+HEIGHT = 1960
 MARGIN_X = 82
+INDUSTRY_TOP_N = 2  # 图片里产业动态克制: 最多 2 条, 否则破坏整体克制感
 
 PAPER = (247, 243, 235)
 INK = (29, 33, 36)
@@ -161,6 +163,50 @@ def sort_top(items: list[dict]) -> list[dict]:
     return top
 
 
+def load_industry_top() -> list[dict]:
+    """读取 feed-industry.json, 取 curated-media 优先 + 最新的最多 2 条。"""
+    if not FEED_INDUSTRY_PATH.exists():
+        return []
+    try:
+        data = json.loads(FEED_INDUSTRY_PATH.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return []
+    items = data.get("items", [])
+    rank = {"curated-media": 0, "official-newsroom": 1}
+    items = sorted(items, key=lambda it: it.get("published_date", ""), reverse=True)
+    items = sorted(items, key=lambda it: rank.get(it.get("provenance_subtier") or "", 2))
+    return items[:INDUSTRY_TOP_N]
+
+
+def draw_industry(draw: ImageDraw.ImageDraw, items: list[dict], y: int) -> int:
+    if not items:
+        return y
+    label_font = load_font(33, "serif")
+    title_font = load_font(24, "bold")
+    meta_font = load_font(19, "body")
+
+    draw.text((MARGIN_X, y), "产业动态", font=label_font, fill=GREEN)
+    draw.line([(MARGIN_X, y + 46), (200, y + 46)], fill=AMBER, width=4)
+    y += 78
+
+    for it in items:
+        src = it.get("source_name", "")
+        draw.text((MARGIN_X, y), f"\u00b7 {src}", font=meta_font, fill=BLUE)
+
+        title = sanitize_text(it.get("title", "(untitled)"))
+        tl = wrap_text(title, title_font, WIDTH - 2 * MARGIN_X, max_lines=2)
+        ty = y + 32
+        for line in tl:
+            draw.text((MARGIN_X, ty), line, font=title_font, fill=INK)
+            ty += 30
+
+        date = it.get("published_date", "")
+        meta = ellipsize(f"{date}  |  {it.get('url', '')}", meta_font, WIDTH - 2 * MARGIN_X)
+        draw.text((MARGIN_X, ty + 4), meta, font=meta_font, fill=MUTED)
+        y = ty + 44
+    return y
+
+
 def rounded_rectangle(draw, box, radius, fill, outline=None, width=1):
     draw.rounded_rectangle(box, radius=radius, fill=fill, outline=outline, width=width)
 
@@ -281,6 +327,8 @@ def render_pil(top: list[dict], today: str) -> list[Path]:
     for idx, item in enumerate(top, 1):
         y = draw_item(draw, item, idx, y)
 
+    y = draw_industry(draw, load_industry_top(), y)
+
     foot_font = load_font(23, "serif")
     draw_source_mark(draw, MARGIN_X, HEIGHT - 92, foot_font)
 
@@ -309,6 +357,16 @@ def render_html(top: list[dict], today: str) -> list[Path]:
             f"<p>{html.escape(short_summary(item.get('abstract', '')))}</p></div>"
             "</section>"
         )
+    ind_top = load_industry_top()
+    ind_cards = []
+    for it in ind_top:
+        ind_cards.append(
+            "<section class='item ind'>"
+            f"<div class='src'>{html.escape(it.get('source_name', ''))}</div>"
+            f"<h3>{html.escape(sanitize_text(it.get('title', '(untitled)')))}</h3>"
+            f"<p class='meta'>{html.escape(it.get('published_date', ''))} | "
+            f"{html.escape(it.get('url', ''))}</p></section>"
+        )
     page = (
         "<!doctype html><html lang='zh-CN'><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
@@ -321,11 +379,15 @@ def render_html(top: list[dict], today: str) -> list[Path]:
         ".item{display:grid;grid-template-columns:80px 1fr;gap:28px;border-bottom:1px solid #bbb;padding:24px 0}"
         ".num{font-size:42px;color:#315f4a}.tier{color:#fff;border-radius:18px;padding:4px 13px;font-weight:700}"
         "h2{font:700 25px 'Microsoft YaHei',sans-serif;margin:12px 0 8px}.meta,p{font:18px/1.55 'Microsoft YaHei',sans-serif;color:#666}"
+        ".ind{border-bottom:1px solid #ddd;background:#fbf8f1;padding:18px 24px}"
+        ".ind .src{color:#5c8196;font-weight:700;margin-bottom:6px}.ind h3{font:700 21px 'Microsoft YaHei',sans-serif;margin:0 0 6px}"
+        ".industry-h{color:#315f4a;font-size:30px;margin:40px 0 10px}"
         ".foot{margin-top:32px;color:#315f4a}"
         "</style></head><body><main class='wrap'>"
         f"<div class='rule'><span class='digest'>Research Digest</span></div><h1>钙钛矿情报雷达</h1>"
         f"<div class='under'></div><div class='top'>Top 5 / {html.escape(today)}</div>"
         + "".join(cards)
+        + ("<div class='industry-h'>产业动态</div>" + "".join(ind_cards) if ind_cards else "")
         + "<div class='foot'>source verified | 完整链接见配套 digest.txt</div></main></body></html>"
     )
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
