@@ -1,16 +1,22 @@
 # perovskite-scout-skill
 
+<a id="zh"></a>
+
 **中文名：钙钛矿情报雷达**  
 **项目名：Perovskite Scout**  
 **版本：v0.1.0**
+
+语言：**中文** | [English](#en)
+
+![钙钛矿情报雷达预览](docs/perovskite-scout-card.png)
 
 这是一个面向钙钛矿光伏领域的可信源情报雷达。它会定时追踪论文与行业动态，使用确定性规则过滤噪声、判定可信度、跨来源去重，并生成可直接发到微信的文本简报和图片卡片。
 
 这个项目的重点不是“让 LLM 帮你随便搜新闻”，而是建立一条可审计、可复现、可定时运行的情报管线：
 
 ```text
-论文发现 → 元数据补全 → 行业 RSS → 跨 feed 去重
-→ 文本/图片渲染 → 校验 → 投递包
+论文发现 -> 元数据补全 -> 行业 RSS -> 跨 feed 去重
+-> 文本/图片渲染 -> 校验 -> 投递包
 ```
 
 ## 核心原则
@@ -114,6 +120,122 @@ README-perovskite-scout.md    更详细的运行手册
 VERSION                       当前版本
 ```
 
-## English Short Description
+---
 
-Perovskite Scout is a trusted-source intelligence radar for perovskite photovoltaics. It tracks papers and curated industry RSS feeds, filters and ranks items with deterministic rules, renders WeChat-ready digest artifacts, validates them, and packages them for scheduled delivery.
+<a id="en"></a>
+
+# Perovskite Scout Skill
+
+Language: [中文](#zh) | **English**
+
+![Perovskite Scout preview](docs/perovskite-scout-card.png)
+
+Perovskite Scout is a trusted-source intelligence radar for perovskite photovoltaics. It tracks papers and curated industry RSS feeds, filters and ranks items with deterministic rules, deduplicates across feeds, renders WeChat-ready digest artifacts, validates them, and packages them for scheduled delivery.
+
+The project is intentionally conservative: it does not ask an LLM to browse, judge trustworthiness, decide relevance, or choose what enters the feed. Those decisions are handled by auditable rule-based scripts.
+
+```text
+paper discovery -> metadata enrichment -> industry RSS -> cross-feed dedupe
+-> text/image rendering -> validation -> delivery package
+```
+
+## Core Principles
+
+**LLMs do not decide trust or relevance.**
+
+- `tier` must be assigned by `scripts/tier_mapper.py`.
+- `relevance` must be assigned by `scripts/relevance_filter.py`.
+- LLMs must not decide whether an item enters a feed.
+- Delivery must pass `scripts/validate_outputs.py`.
+- Quiet production runs write `skipped` and must not send stale content.
+
+## What It Does
+
+- Discovers perovskite PV papers from arXiv.
+- Enriches paper metadata through OpenAlex and Crossref.
+- Tracks curated industry RSS feeds such as Perovskite-Info and pv magazine.
+- Keeps paper and industry feeds separate, then deduplicates across them.
+- Generates WeChat-ready artifacts:
+  - `output/delivery/message.txt`: text digest
+  - `output/delivery/card.png`: image card
+  - `output/delivery/delivery-manifest.json`: delivery decision manifest
+- Supports local delivery packaging and webhook delivery.
+- Provides adapter entrypoints for Codex, Claude Code, HermesAgent, and openclaw.
+
+## Quick Start
+
+```bash
+# Preview mode: ignore state and generate a full current digest.
+python scripts/deliver.py --mode preview
+
+# Production mode: normal dedupe; quiet weeks are marked as skipped.
+python scripts/deliver.py
+
+# Validate outputs without delivery.
+python scripts/validate_outputs.py
+```
+
+Optional PNG rendering dependency:
+
+```bash
+pip install -r requirements-optional.txt
+```
+
+Without Pillow, the image renderer falls back to HTML.
+
+## Delivery Contract
+
+After `scripts/deliver.py` runs, read:
+
+```text
+output/delivery/delivery-manifest.json
+```
+
+Use `status` to decide what to send:
+
+| status | Action |
+|---|---|
+| `ready` | Send `card.png` + `message.txt` |
+| `skipped` | No new content; send nothing |
+| non-zero command exit | Pipeline or validation failed; send an error notification, not the digest |
+
+See [openclaw-manual.md](openclaw-manual.md) for scheduler setup and [perovskite-scout-skill/references/webhook-contract.md](perovskite-scout-skill/references/webhook-contract.md) for the webhook contract.
+
+## Cross-Agent Entrypoints
+
+```text
+perovskite-scout-skill/
+  SKILL.md       # Codex
+  CLAUDE.md      # Claude Code
+  HERMES.md      # HermesAgent
+  references/    # openclaw manual, webhook contract, spec, playbook
+```
+
+All entrypoints call the same project-level `scripts/` directory. The skill package does not copy scripts, which avoids double maintenance.
+
+## Data Sources
+
+Included in v0.1.0:
+
+- arXiv: paper discovery
+- OpenAlex / Crossref: metadata enrichment, not discovery
+- Perovskite-Info: industry RSS
+- pv magazine: industry RSS with keyword filtering
+
+Deferred:
+
+- official newsroom HTML monitors
+- NREL efficiency chart monitored asset
+- X / LinkedIn / WeChat public accounts / blogger-social layer
+- PDF device-metric extraction with PERLA / NOMAD-style validation
+
+## Repository Layout
+
+```text
+config/                       source and enrichment configuration
+scripts/                      discovery, filtering, dedupe, rendering, validation, delivery
+perovskite-scout-skill/       cross-agent skill package
+openclaw-manual.md            openclaw scheduler and delivery notes
+README-perovskite-scout.md    detailed running guide
+VERSION                       current version
+```
