@@ -1,5 +1,8 @@
 {
-  "_schema": "行业源配置。type=抓取机制(rss|html-monitor|api|monitored-asset)；source_type=可信度子级(currated-media|official-newsroom|null)，对应 item.provenance_subtier。query_terms 为空表示整源采用(已是垂直门户)，非空则按关键词轻量过滤(小写包含匹配)。",
+  "_schema": "Industry source configuration. type is the fetch mechanism; source_type is the provenance subtier. query_terms=[] keeps all items from a curated vertical source.",
+  "health": {
+    "default_failure_threshold": 1
+  },
   "sources": [
     {
       "id": "perovskite-info",
@@ -9,6 +12,8 @@
       "url": "https://www.perovskite-info.com/rss.xml",
       "home": "https://www.perovskite-info.com/",
       "query_terms": [],
+      "critical": true,
+      "failure_threshold": 1,
       "enabled": true
     },
     {
@@ -19,6 +24,8 @@
       "url": "https://www.pv-magazine.com/feed/",
       "home": "https://www.pv-magazine.com/",
       "query_terms": ["perovskite", "tandem"],
+      "critical": true,
+      "failure_threshold": 1,
       "enabled": true
     }
   ]

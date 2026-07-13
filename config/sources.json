@@ -1,9 +1,11 @@
 {
   "arxiv": {
     "enabled": true,
-    "base_url": "http://export.arxiv.org/api/query",
+    "base_url": "https://export.arxiv.org/api/query",
     "search_query": "abs:perovskite AND (abs:solar OR abs:photovoltaic)",
-    "max_results": 30,
+    "page_size": 100,
+    "max_pages": 20,
+    "watermark_overlap_days": 7,
     "sortBy": "submittedDate",
     "sortOrder": "descending",
     "type": "paper"
