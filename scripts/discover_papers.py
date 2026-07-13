@@ -175,15 +175,25 @@ def parse_entries(xml_text: str, doc_type: str) -> list[dict]:
     return out
 
 
-def scan_arxiv(cfg: dict, doc_type: str, watermark: str | None) -> tuple[list[dict], str | None, dict]:
+def scan_arxiv(
+    cfg: dict,
+    doc_type: str,
+    watermark: str | None,
+    *,
+    overlap_days: int | None = None,
+) -> tuple[list[dict], str | None, dict]:
     page_size = int(cfg.get("page_size", cfg.get("max_results", 100)))
     max_pages = int(cfg.get("max_pages", 20))
-    overlap_days = int(cfg.get("watermark_overlap_days", 7))
-    if page_size < 1 or max_pages < 1 or overlap_days < 0:
+    effective_overlap_days = (
+        int(cfg.get("watermark_overlap_days", 7))
+        if overlap_days is None
+        else overlap_days
+    )
+    if page_size < 1 or max_pages < 1 or effective_overlap_days < 0:
         raise ValueError("arXiv page_size/max_pages must be positive and watermark_overlap_days non-negative")
 
     previous = parse_timestamp(watermark or "")
-    cutoff = previous - timedelta(days=overlap_days) if previous else None
+    cutoff = previous - timedelta(days=effective_overlap_days) if previous else None
     entries: list[dict] = []
     start = int(cfg.get("start", 0))
 
@@ -194,12 +204,24 @@ def scan_arxiv(cfg: dict, doc_type: str, watermark: str | None) -> tuple[list[di
         reached_watermark = bool(cutoff and any(ts and ts <= cutoff for ts in page_times))
         exhausted = len(page) < page_size
         if reached_watermark or exhausted:
+            # The terminal page often straddles the cutoff. It is needed to
+            # prove that pagination covered the window, but its older entries
+            # must not leak into a bounded bootstrap/preview digest.
+            eligible = [
+                item for item in entries
+                if cutoff is None
+                or (timestamp := parse_timestamp(item.get("published_at", ""))) is None
+                or timestamp > cutoff
+            ]
             newest = max((ts for item in entries if (ts := parse_timestamp(item.get("published_at", "")))), default=None)
-            return entries, (timestamp_text(newest) if newest else watermark), {
+            return eligible, (timestamp_text(newest) if newest else watermark), {
                 "pages": page_number + 1,
-                "entry_count": len(entries),
+                "entry_count": len(eligible),
+                "fetched_entry_count": len(entries),
                 "completed_by": "watermark" if reached_watermark else "exhausted",
                 "previous_watermark": watermark,
+                "cutoff": timestamp_text(cutoff) if cutoff else None,
+                "overlap_days": effective_overlap_days,
             }
 
     raise RuntimeError(
@@ -233,7 +255,17 @@ def main() -> int:
             f"size={arxiv_cfg.get('page_size', arxiv_cfg.get('max_results', 100))}, "
             f"watermark={watermark or 'none'} ({watermark_origin})"
         )
-        entries, next_watermark, scan = scan_arxiv(arxiv_cfg, doc_type, watermark)
+        # The overlap is a retry safety net for a persisted watermark. Fresh
+        # bootstrap/preview windows have no prior delivery boundary, so their
+        # configured lookback is an exact output window rather than lookback
+        # plus another overlap interval.
+        overlap_days = None if watermark_origin == "state" else 0
+        entries, next_watermark, scan = scan_arxiv(
+            arxiv_cfg,
+            doc_type,
+            watermark,
+            overlap_days=overlap_days,
+        )
         scan["watermark_origin"] = watermark_origin
     except Exception as exc:  # no feed/state write on an incomplete discovery scan
         print(f"[FAIL] arXiv discovery: {type(exc).__name__}: {exc}", file=sys.stderr)

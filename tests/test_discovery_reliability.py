@@ -72,6 +72,35 @@ class PaperWatermarkTests(unittest.TestCase):
             self.assertEqual(updated["_meta"]["sources"]["arxiv"]["watermark"], "2026-07-13T12:00:00Z")
             self.assertEqual(updated["arxiv:2607.00003"], updated["arxiv:2607.00001"])
 
+    def test_terminal_page_does_not_leak_unseen_entries_before_cutoff(self):
+        cfg = {
+            "base_url": "https://example.invalid/api",
+            "search_query": "all:perovskite",
+            "page_size": 3,
+            "max_pages": 2,
+            "watermark_overlap_days": 7,
+        }
+        page = arxiv_xml([
+            ("2607.00001v1", "2026-07-13T12:00:00Z"),
+            ("2607.00002v1", "2026-07-11T12:00:00Z"),
+            ("2607.00003v1", "2026-07-09T12:00:00Z"),
+        ])
+        with patch.object(discover_papers, "fetch_arxiv_page", return_value=page):
+            entries, _, scan = discover_papers.scan_arxiv(
+                cfg,
+                "paper",
+                "2026-07-10T00:00:00Z",
+                overlap_days=0,
+            )
+
+        self.assertEqual(
+            [entry["id"] for entry in entries],
+            ["arxiv:2607.00001", "arxiv:2607.00002"],
+        )
+        self.assertEqual(scan["fetched_entry_count"], 3)
+        self.assertEqual(scan["entry_count"], 2)
+        self.assertEqual(scan["cutoff"], "2026-07-10T00:00:00Z")
+
     def test_fetch_failure_does_not_advance_watermark_or_replace_old_feed(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
