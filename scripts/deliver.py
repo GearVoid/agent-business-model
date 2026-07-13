@@ -33,10 +33,12 @@
 """
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
 import sys
+import time
 import urllib.request
 import uuid
 from datetime import datetime, timezone
@@ -47,6 +49,9 @@ sys.path.insert(0, str(SCRIPTS))
 BASE = Path(__file__).resolve().parent.parent
 OUTPUT = BASE / "output"
 DELIVERY_DIR = OUTPUT / "delivery"
+LOCK_FILENAME = "deliver.lock"
+DEFAULT_LOCK_TTL_SECONDS = 60 * 60
+DEFAULT_WEBHOOK_TIMEOUT_SECONDS = 30
 
 import run_pipeline  # noqa: E402
 import validate_outputs  # noqa: E402
@@ -61,6 +66,125 @@ COMPACT_DIGEST = OUTPUT / "perovskite-scout-digest-compact.txt"
 CARD_PNG = OUTPUT / "perovskite-scout-card.png"
 DELIVERY_PAYLOADS = ("message.txt", "message-compact.txt", "card.png")
 STATE_PATHS = (STATE_PAPERS, STATE_INDUSTRY)
+
+
+class DeliveryLockError(RuntimeError):
+    """A second delivery invocation attempted to use the same workspace."""
+
+
+class DeliveryLock:
+    """An O_EXCL lock that works on Windows and POSIX filesystems.
+
+    The lock file is intentionally kept in the delivery directory so the lock
+    covers the state, feed, and delivery artifacts managed by this command.
+    Its expiry is a recovery mechanism for a crashed process, not a lease for
+    a healthy long-running process; deployments with longer jobs can raise the
+    TTL with --lock-ttl-seconds.
+    """
+
+    def __init__(self, path: Path, ttl_seconds: int):
+        self.path = path
+        self.ttl_seconds = ttl_seconds
+        self.acquired = False
+
+    @staticmethod
+    def _metadata_is_expired(path: Path, ttl_seconds: int) -> bool:
+        now = time.time()
+        try:
+            metadata = json.loads(path.read_text(encoding="utf-8"))
+            expires_at = float(metadata["expires_at_epoch"])
+        except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+            # A process may be between O_EXCL creation and its first write.
+            # Treat malformed metadata as stale only after a full TTL.
+            try:
+                return now - path.stat().st_mtime >= ttl_seconds
+            except OSError:
+                return True
+        return now >= expires_at
+
+    def acquire(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        # A bounded retry is enough for a stale lock that another process has
+        # just recovered; a live lock fails immediately.
+        for _ in range(2):
+            started_epoch = time.time()
+            metadata = {
+                "pid": os.getpid(),
+                "started_at": datetime.now(timezone.utc).isoformat(),
+                "started_at_epoch": started_epoch,
+                "expires_at_epoch": started_epoch + self.ttl_seconds,
+                "ttl_seconds": self.ttl_seconds,
+            }
+            try:
+                fd = os.open(
+                    self.path,
+                    os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                    0o600,
+                )
+            except FileExistsError:
+                if not self._metadata_is_expired(self.path, self.ttl_seconds):
+                    raise DeliveryLockError(
+                        f"another delivery run holds {self.path}; "
+                        "wait for it to finish or for the expired lock to recover"
+                    )
+                try:
+                    self.path.unlink()
+                except FileNotFoundError:
+                    continue
+                except OSError as exc:
+                    raise DeliveryLockError(
+                        f"cannot recover expired delivery lock {self.path}: {exc}"
+                    ) from exc
+                continue
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                    json.dump(metadata, handle, ensure_ascii=False)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            except Exception:
+                try:
+                    self.path.unlink()
+                except OSError:
+                    pass
+                raise
+            self.acquired = True
+            return
+        raise DeliveryLockError(f"could not acquire delivery lock {self.path}")
+
+    def release(self) -> None:
+        if not self.acquired:
+            return
+        try:
+            self.path.unlink()
+        except FileNotFoundError:
+            pass
+        finally:
+            self.acquired = False
+
+
+def delivery_lock_path() -> Path:
+    return DELIVERY_DIR / LOCK_FILENAME
+
+
+def compute_delivery_id(mode: str) -> str:
+    """Return a repeatable id for the same rendered input and delivery mode."""
+    canonical_feeds: dict[str, object] = {}
+    for label, path in (("papers", FEED_PAPERS), ("industry", FEED_INDUSTRY)):
+        try:
+            feed = json.loads(path.read_text(encoding="utf-8"))
+            # Discovery timestamps and scan metadata describe *when* the
+            # pipeline ran, not what is being delivered. Excluding them keeps
+            # retries of the same items idempotent.
+            canonical_feeds[label] = feed.get("items", [])
+        except (OSError, AttributeError, json.JSONDecodeError):
+            canonical_feeds[label] = None
+    encoded = json.dumps(
+        {"mode": mode, "feeds": canonical_feeds},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "dly_" + hashlib.sha256(encoded).hexdigest()
 
 
 def new_count(state_path: Path) -> int:
@@ -170,27 +294,64 @@ def restore_states(snapshot: dict[Path, bytes | None]) -> None:
             write_bytes_atomic(path, data)
 
 
-def write_status_manifest(status: str, mode: str, reason: str) -> Path:
+def write_status_manifest(
+    status: str,
+    mode: str,
+    reason: str,
+    *,
+    delivery_id: str | None = None,
+    transport: str = "local",
+    clear_payloads: bool = True,
+    local_fallback_available: bool = False,
+) -> Path:
     """原子写 non-ready 状态，并清理可发送正文。"""
     manifest = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "mode": mode,
         "status": status,
         "reason": reason,
+        "transport": transport,
         "papers_count": feed_len(FEED_PAPERS),
         "paper_count": feed_len(FEED_PAPERS),
         "industry_count": feed_len(FEED_INDUSTRY),
     }
+    if delivery_id:
+        manifest["delivery_id"] = delivery_id
+    if local_fallback_available:
+        # These payloads are usable only by an explicitly configured local
+        # consumer. status remains failed because remote delivery did not occur.
+        manifest.update({
+            "local_fallback_available": True,
+            "remote_delivery_status": "failed",
+            "text_file": "message.txt",
+            "compact_text_file": "message-compact.txt",
+            "preferred_text_file": "message-compact.txt",
+            "image_file": "card.png",
+            "message_path": "output/delivery/message.txt",
+            "compact_message_path": "output/delivery/message-compact.txt",
+            "card_path": "output/delivery/card.png",
+        })
     mpath = DELIVERY_DIR / "delivery-manifest.json"
     # 先原子切换到 non-ready，再尽力清 payload；消费者始终以 manifest 为准。
     write_json_atomic(mpath, manifest)
-    clear_delivery_payloads()
+    if clear_payloads:
+        clear_delivery_payloads()
     return mpath
 
 
-def write_local(message: str, compact_message: str, mode: str) -> Path:
+def write_local(
+    message: str,
+    compact_message: str,
+    mode: str,
+    delivery_id: str | None = None,
+    transport: str = "local",
+) -> Path:
     """事务式组包：payload 全部就绪后，最后原子切换 manifest=ready。"""
-    write_status_manifest("preparing", mode, "packaging_in_progress")
+    delivery_id = delivery_id or compute_delivery_id(mode)
+    write_status_manifest(
+        "preparing", mode, "packaging_in_progress",
+        delivery_id=delivery_id, transport=transport,
+    )
     if not CARD_PNG.exists():
         raise FileNotFoundError(f"微信投递缺 PNG 卡片: {CARD_PNG}")
 
@@ -214,13 +375,20 @@ def write_local(message: str, compact_message: str, mode: str) -> Path:
             except OSError:
                 pass
         clear_delivery_payloads()
-        write_status_manifest("failed", mode, "packaging_failed")
+        write_status_manifest(
+            "failed", mode, "packaging_failed",
+            delivery_id=delivery_id, transport=transport,
+        )
         raise
 
     manifest = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "mode": mode,
         "status": "ready",
+        "reason": "package_ready",
+        "transport": transport,
+        "delivery_id": delivery_id,
+        "remote_delivery_status": "pending" if transport == "webhook" else "not_requested",
         "papers_count": feed_len(FEED_PAPERS),
         "paper_count": feed_len(FEED_PAPERS),
         "industry_count": feed_len(FEED_INDUSTRY),
@@ -239,11 +407,16 @@ def write_local(message: str, compact_message: str, mode: str) -> Path:
     return mpath
 
 
-def send_webhook(message: str, compact_message: str, manifest: dict) -> bool:
+def send_webhook(
+    message: str,
+    compact_message: str,
+    manifest: dict,
+    timeout_seconds: float = DEFAULT_WEBHOOK_TIMEOUT_SECONDS,
+) -> bool:
     """transport=webhook: POST 到 $DELIVERY_WEBHOOK。返回是否成功。"""
     url = os.environ.get("DELIVERY_WEBHOOK")
     if not url:
-        print("[SKIP] webhook 未配置 $DELIVERY_WEBHOOK, 退回 local 模式写入")
+        print("[FAIL] webhook 未配置 $DELIVERY_WEBHOOK")
         return False
     payload = {
         "text": message,
@@ -251,6 +424,7 @@ def send_webhook(message: str, compact_message: str, manifest: dict) -> bool:
         "image_path": str(DELIVERY_DIR / "card.png")
         if (DELIVERY_DIR / "card.png").exists() else None,
         "manifest": manifest,
+        "delivery_id": manifest.get("delivery_id"),
         # 扁平别名与文档契约对齐；保留上方旧字段以兼容已有接收端。
         "status": manifest.get("status"),
         "mode": manifest.get("mode"),
@@ -264,11 +438,14 @@ def send_webhook(message: str, compact_message: str, manifest: dict) -> bool:
     req = urllib.request.Request(
         url,
         data=data,
-        headers={"Content-Type": "application/json; charset=utf-8"},
+        headers={
+            "Content-Type": "application/json; charset=utf-8",
+            "Idempotency-Key": manifest.get("delivery_id", ""),
+        },
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
             print(f"[OK] webhook POST -> {resp.status}")
             return True
     except Exception as e:  # noqa: BLE001
@@ -276,23 +453,26 @@ def send_webhook(message: str, compact_message: str, manifest: dict) -> bool:
         return False
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser(description="钙钛矿情报雷达 投递闭环")
-    ap.add_argument(
-        "--mode",
-        choices=["production", "preview"],
-        default="production",
-        help="production=正常去重只推新增(默认); preview=--ignore-state 看完整内容",
-    )
-    ap.add_argument(
-        "--transport",
-        choices=["local", "webhook"],
-        default="local",
-        help="local=写 output/delivery/(默认); webhook=POST 到 $DELIVERY_WEBHOOK",
-    )
-    args = ap.parse_args()
+def mark_webhook_delivered(manifest_path: Path, manifest: dict) -> None:
+    """Record remote acknowledgement without changing the ready package contract."""
+    manifest = dict(manifest)
+    manifest["remote_delivery_status"] = "delivered"
+    manifest["remote_delivered_at"] = datetime.now(timezone.utc).isoformat()
+    write_json_atomic(manifest_path, manifest)
 
+
+def _run_delivery(args: argparse.Namespace) -> int:
     print(f"\n=== deliver [{args.mode}] transport={args.transport} ===")
+
+    # Do not start the deduplicating pipeline when the configured transport
+    # cannot possibly deliver. This keeps a missing deployment secret from
+    # consuming otherwise deliverable items.
+    if args.transport == "webhook" and not os.environ.get("DELIVERY_WEBHOOK"):
+        write_status_manifest(
+            "failed", args.mode, "webhook_url_missing", transport="webhook"
+        )
+        print("[FAIL] webhook 未配置 $DELIVERY_WEBHOOK，未启动管线")
+        return 1
 
     state_snapshot: dict[Path, bytes | None] = {}
     if args.mode == "production":
@@ -374,11 +554,20 @@ def main() -> int:
     message = build_message(args.mode)
     compact_message = build_message(args.mode, COMPACT_DIGEST, compact=True)
     try:
-        mpath = write_local(message, compact_message, args.mode)
+        delivery_id = compute_delivery_id(args.mode)
+        mpath = write_local(
+            message,
+            compact_message,
+            args.mode,
+            delivery_id=delivery_id,
+            transport=args.transport,
+        )
     except Exception as exc:  # noqa: BLE001
         rollback_state()
         try:
-            write_status_manifest("failed", args.mode, "packaging_failed")
+            write_status_manifest(
+                "failed", args.mode, "packaging_failed", transport=args.transport
+            )
         except OSError:
             pass
         print(f"[FAIL] 投递包组装失败，未切换 ready: {exc}")
@@ -392,15 +581,89 @@ def main() -> int:
     # 5) 推送出口
     if args.transport == "webhook":
         manifest = json.loads(mpath.read_text(encoding="utf-8"))
-        ok = send_webhook(message, compact_message, manifest)
+        ok = send_webhook(
+            message,
+            compact_message,
+            manifest,
+            timeout_seconds=args.webhook_timeout_seconds,
+        )
         if not ok:
-            # 已经写好了 local 包, 这里只提示
-            print("[NOTE] 已退回 local 包, openclaw 可读 output/delivery/ 推送")
+            rollback_state()
+            fallback = args.allow_local_fallback
+            reason = (
+                "webhook_failed_local_fallback_available"
+                if fallback else "webhook_delivery_failed"
+            )
+            write_status_manifest(
+                "failed",
+                args.mode,
+                reason,
+                delivery_id=manifest.get("delivery_id"),
+                transport="webhook",
+                clear_payloads=not fallback,
+                local_fallback_available=fallback,
+            )
+            if fallback:
+                print("[FAIL] webhook 未送达；已显式保留本地 fallback，但仍返回失败")
+            else:
+                print("[FAIL] webhook 未送达；已清理本地 payload 并回滚去重 state")
+            return 1
+        mark_webhook_delivered(mpath, manifest)
     else:
         print("[NOTE] transport=local: openclaw 优先发送 message-compact.txt + card.png；长版保留为 message.txt")
 
     print("\n[OK] 投递闭环完成")
     return 0
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="钙钛矿情报雷达 投递闭环")
+    ap.add_argument(
+        "--mode",
+        choices=["production", "preview"],
+        default="production",
+        help="production=正常去重只推新增(默认); preview=--ignore-state 看完整内容",
+    )
+    ap.add_argument(
+        "--transport",
+        choices=["local", "webhook"],
+        default="local",
+        help="local=写 output/delivery/(默认); webhook=POST 到 $DELIVERY_WEBHOOK",
+    )
+    ap.add_argument(
+        "--allow-local-fallback",
+        action="store_true",
+        help="webhook 失败时保留本地 payload；仍写 failed 并返回非零",
+    )
+    ap.add_argument(
+        "--webhook-timeout-seconds",
+        type=float,
+        default=DEFAULT_WEBHOOK_TIMEOUT_SECONDS,
+        help="webhook HTTP timeout (default: 30)",
+    )
+    ap.add_argument(
+        "--lock-ttl-seconds",
+        type=int,
+        default=DEFAULT_LOCK_TTL_SECONDS,
+        help="expired lock recovery threshold (default: 3600)",
+    )
+    args = ap.parse_args()
+    if args.webhook_timeout_seconds <= 0 or args.lock_ttl_seconds <= 0:
+        ap.error("--webhook-timeout-seconds and --lock-ttl-seconds must be positive")
+
+    lock = DeliveryLock(delivery_lock_path(), args.lock_ttl_seconds)
+    try:
+        lock.acquire()
+    except DeliveryLockError as exc:
+        # Do not create a failed manifest here: a live owner is the only
+        # process allowed to mutate delivery state and artifacts.
+        print(f"[FAIL] delivery lock unavailable: {exc}")
+        return 1
+
+    try:
+        return _run_delivery(args)
+    finally:
+        lock.release()
 
 
 if __name__ == "__main__":
