@@ -14,6 +14,7 @@ import json
 import sys
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 from text_utils import sanitize_text, safe_reconfigure_stdout
 
@@ -31,6 +32,69 @@ COMPACT_INDUSTRY_TOP_N = 2  # 短版与图片产业区保持一致
 COMPACT_TITLE_CHARS = 118   # 长英文标题在微信里最多占两到三行
 COMPACT_LIMIT = 2800        # 为微信单条消息预留投递头部余量
 PAGE_LIMIT = 3500    # 单页最大字符数, 超出自动分页
+
+
+# Delivery is deliberately a presentation concern. These limits do not change
+# the canonical feeds or the relevance/tier decisions that produced them.
+COMPACT_PAPER_TOP_N = TOP_N
+CARD_PAPER_TOP_N = 3
+CARD_INDUSTRY_TOP_N = 1
+
+# Ordered, title-only keyword rules keep card tags inspectable and stable. A
+# tag is shown only when its explicit keyword rule matches; no model inference
+# or rewriting is involved.
+TOPIC_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("passivation", ("passivation", "passivated")),
+    ("stability", ("stability", "stable", "degradation", "durability")),
+    ("interfaces", ("interface", "surface", "contact")),
+    ("tandem", ("tandem", "multijunction")),
+    ("wide-bandgap", ("wide bandgap", "wide-bandgap")),
+    ("fabrication", ("fabrication", "processing", "printing", "coating")),
+    ("modules", ("module", "modules", "scale-up", "scalable")),
+    ("lead-free", ("lead-free", "lead free", "tin-based", "tin based")),
+)
+
+_CIRCLED_INDICES = ("", "\u2460", "\u2461", "\u2462", "\u2463", "\u2464", "\u2465", "\u2466", "\u2467", "\u2468", "\u2469")
+
+
+def delivery_label(index: int) -> str:
+    """Return the compact label shared by the card and link index."""
+    return _CIRCLED_INDICES[index] if 0 < index < len(_CIRCLED_INDICES) else f"({index})"
+
+
+def with_delivery_indices(
+    papers: list[dict], industry_items: list[dict]
+) -> tuple[list[dict], list[dict]]:
+    """Copy selected presentation items and assign one continuous index series."""
+    indexed_papers = [dict(item, delivery_index=index) for index, item in enumerate(papers, 1)]
+    first_industry_index = len(indexed_papers) + 1
+    indexed_industry = [
+        dict(item, delivery_index=index)
+        for index, item in enumerate(industry_items, first_industry_index)
+    ]
+    return indexed_papers, indexed_industry
+
+
+def source_label(item: dict) -> str:
+    """Provide a reader-facing source name without exposing enrich metadata."""
+    source = sanitize_text(item.get("source_name", "")).strip()
+    if source:
+        return source
+    domain = str(item.get("source_domain") or urlparse(str(item.get("url", ""))).netloc)
+    domain = domain.lower().removeprefix("www.")
+    if domain == "arxiv.org":
+        return "arXiv"
+    return domain or "Source"
+
+
+def topic_tags(item: dict, limit: int = 2) -> list[str]:
+    """Return up to ``limit`` deterministic tags from the original title."""
+    title = sanitize_text(item.get("title", "")).lower()
+    return [
+        label
+        for label, keywords in TOPIC_KEYWORDS
+        if any(keyword in title for keyword in keywords)
+    ][:limit]
 
 
 def fmt_authors(authors: list) -> str:
@@ -99,8 +163,6 @@ def render_industry_item(it: dict) -> str:
 def compact_title(value: str | None) -> str:
     """为微信短版截断标题；URL 保持完整，确保仍可点击。"""
     title = sanitize_text(value or "(无标题)")
-    if len(title) > COMPACT_TITLE_CHARS:
-        return title[:COMPACT_TITLE_CHARS].rstrip() + "…"
     return title
 
 
@@ -116,29 +178,31 @@ def render_compact_digest(
     top 与 industry_items 均由本模块既有确定性排序结果传入；这里不重新
     判定 tier、relevance 或入选资格，也不调用 LLM。
     """
-    industry_top = industry_items[:COMPACT_INDUSTRY_TOP_N]
+    delivery_papers, industry_top = with_delivery_indices(
+        top[:COMPACT_PAPER_TOP_N], industry_items[:COMPACT_INDUSTRY_TOP_N]
+    )
     lines = [
         f"钙钛矿情报雷达｜{today}",
         f"论文 {papers_count} 条 · 产业 {industry_count} 条",
         "看图读摘要，文字点链接。",
     ]
 
-    if top:
-        lines.extend(["", f"论文 Top {len(top)}"])
-        for idx, it in enumerate(top, 1):
+    if delivery_papers:
+        lines.extend(["", f"论文 Top {len(delivery_papers)}"])
+        for it in delivery_papers:
             tier = it.get("provenance_tier", "?")
             lines.extend([
-                f"{idx}. [{tier}] {compact_title(it.get('title'))}",
+                f"{delivery_label(it['delivery_index'])} [{tier}] {compact_title(it.get('title'))}",
                 str(it.get("url", "")),
             ])
 
     lines.extend(["", f"产业动态 Top {len(industry_top)}"])
     if industry_top:
-        for idx, it in enumerate(industry_top, 1):
+        for it in industry_top:
             tier = it.get("provenance_tier", "?")
-            source = sanitize_text(it.get("source_name", ""))
+            source = source_label(it)
             lines.extend([
-                f"{idx}. [{tier}] {source}｜{compact_title(it.get('title'))}",
+                f"{delivery_label(it['delivery_index'])} [{tier}] {source}｜{compact_title(it.get('title'))}",
                 str(it.get("url", "")),
             ])
     else:
