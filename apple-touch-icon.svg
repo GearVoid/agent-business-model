@@ -1,6 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
-  <rect width="512" height="512" fill="#f8f7f4"/>
-  <rect x="54" y="54" width="404" height="404" fill="#fff" stroke="#8a1538" stroke-width="18"/>
-  <text x="158" y="306" fill="#1c1c1e" font-family="Microsoft YaHei UI, PingFang SC, sans-serif" font-size="126" font-weight="700">AI</text>
-  <rect x="118" y="382" width="276" height="22" fill="#8a1538"/>
-</svg>

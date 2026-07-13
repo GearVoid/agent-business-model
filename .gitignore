@@ -3,6 +3,12 @@ assets/
 qa-*.png
 slides.html
 AGENTS.md
+index.html
+favicon.svg
+apple-touch-icon.png
+apple-touch-icon.svg
+share-card.png
+share-card.svg
 
 # ---- perovskite-scout 运行时产物（每次跑管线重新生成，不入库）----
 .workbuddy/

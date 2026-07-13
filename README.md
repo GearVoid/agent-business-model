@@ -116,6 +116,8 @@ config/                       数据源与 enrich 配置
 scripts/                      抓取、过滤、去重、渲染、校验、投递脚本
 perovskite-scout-skill/       跨 Agent skill 包
 openclaw-manual.md            openclaw 定时投递说明
+HANDOFF.md                    给未来 Agent / 新对话的交接文档
+.env.example                  可选环境变量示例
 README-perovskite-scout.md    更详细的运行手册
 VERSION                       当前版本
 ```
@@ -236,6 +238,8 @@ config/                       source and enrichment configuration
 scripts/                      discovery, filtering, dedupe, rendering, validation, delivery
 perovskite-scout-skill/       cross-agent skill package
 openclaw-manual.md            openclaw scheduler and delivery notes
+HANDOFF.md                    handoff guide for future agents or new chats
+.env.example                  optional environment variable example
 README-perovskite-scout.md    detailed running guide
 VERSION                       current version
 ```
